@@ -1,1 +1,3 @@
-myvenv/
+sandbox/
+.conda/
+script.py

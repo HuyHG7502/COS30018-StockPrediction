@@ -1,6 +1,7 @@
 # File: stock_prediction.py
 # Authors: Cheong Koo and Bao Vo
-# Date: 14/07/2021(v1); 19/07/2021 (v2); 25/07/2023 (v3)
+# Date: 14/07/2021 (v1); 19/07/2021 (v2); 25/07/2023 (v3)
+# Date: 26/08/2023 (v4) by Gia Huy Huynh
 
 # Code modified from:
 # Title: Predicting Stock Prices with Python
@@ -17,88 +18,157 @@
 # pip install yfinance
 
 import numpy as np
-import matplotlib.pyplot as plt
 import pandas as pd
-import pandas_datareader as web
-import datetime as dt
-import tensorflow as tf
 import yfinance as yf
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import pandas_datareader as web
 
+import os
+import joblib
+
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow import keras
 from keras.models import Sequential
 from keras.layers import Dense, Dropout, LSTM, InputLayer
 
 #------------------------------------------------------------------------------
-# Load Data
-## TO DO:
-# 1) Check if data has been saved before. 
-# If so, load the saved data
-# If not, save the data into a directory
-#------------------------------------------------------------------------------
+# Parameters
 DATA_SOURCE = "yahoo"
-COMPANY = "TSLA"
-
-# start = '2012-01-01', end='2017-01-01'
-TRAIN_START = '2015-01-01'
-TRAIN_END = '2020-01-01'
-
-data =  yf.download(COMPANY, start=TRAIN_START, end=TRAIN_END, progress=False)
-# yf.download(COMPANY, start = TRAIN_START, end=TRAIN_END)
-
-# For more details: 
-# https://pandas.pydata.org/pandas-docs/stable/user_guide/dsintro.html
-#------------------------------------------------------------------------------
-# Prepare Data
-## To do:
-# 1) Check if data has been prepared before. 
-# If so, load the saved data
-# If not, save the data into a directory
-# 2) Use a different price value eg. mid-point of Open & Close
-# 3) Change the Prediction days
-#------------------------------------------------------------------------------
+COMPANY     = "TSLA"
 PRICE_VALUE = "Close"
 
-scaler = MinMaxScaler(feature_range=(0, 1)) 
-# Note that, by default, feature_range=(0, 1). Thus, if you want a different 
-# feature_range (min, max) then you'll need to specify it here
-scaled_data = scaler.fit_transform(data[PRICE_VALUE].values.reshape(-1, 1)) 
-# Flatten and normalise the data
-# First, we reshape a 1D array(n) to 2D array(n,1)
-# We have to do that because sklearn.preprocessing.fit_transform()
-# requires a 2D array
-# Here n == len(scaled_data)
-# Then, we scale the whole array to the range (0,1)
-# The parameter -1 allows (np.)reshape to figure out the array size n automatically 
-# values.reshape(-1, 1) 
-# https://stackoverflow.com/questions/18691084/what-does-1-mean-in-numpy-reshape'
-# When reshaping an array, the new shape must contain the same number of elements 
-# as the old shape, meaning the products of the two shapes' dimensions must be equal. 
-# When using a -1, the dimension corresponding to the -1 will be the product of 
-# the dimensions of the original array divided by the product of the dimensions 
-# given to reshape so as to maintain the same number of elements.
+TRAIN_START = '2012-01-01'
+TRAIN_END   = '2017-12-31'
+
+TEST_START = "2018-01-01"
+TEST_END   = "2022-12-31"
 
 # Number of days to look back to base the prediction
-PREDICTION_DAYS = 60 # Original
+PREDICTION_DAYS = 60
 
-# To store the training data
-x_train = []
-y_train = []
+#------------------------------------------------------------------------------
+# Load Data
+## TO DO:
+## 2) Use a different price value eg. mid-point of Open & Close
+## 3) Change the Prediction days
+def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, split_by="random", split_pt=None, col="Close", store_data=True, store_scaler=True):
+    """
+    Load data from Yahoo Finance source (for now) with pre-processing, scaling, normalising, and splitting
+    Params:
+        ticker       (str)          : The ticker to load (e.g. AMZN), default to TSLA
+        start, end   (str)          : The start and end dates (training and testing inclusive)
+        split_by     (str)          : The method of data splitting - date, ratio, or random, default to ratio
+        split_pt     (float, str)   : The point of data splitting, e.g. ratio=0.6 (60/40 training and testing) or date="2021-01-01" (specific date)
+        col          (str)          : The column/feature/price value to feed into the model
+        store_data   (bool)         : To store data locally or not
+        store_scaler (bool)         : To store scalers locally or not
+    
+    Returns:
+        data                : The original dataframe
+        x_train, y_train    : Training dataset
+        x_test,  y_test     : Testing dataset
+        scaler              : The scaler for inverse transformation
+        test_dates          : The test dates
+    """
 
-scaled_data = scaled_data[:,0] # Turn the 2D array back to a 1D array
-# Prepare the data
-for x in range(PREDICTION_DAYS, len(scaled_data)):
-    x_train.append(scaled_data[x-PREDICTION_DAYS:x])
-    y_train.append(scaled_data[x])
+    # For more details: 
+    # https://pandas.pydata.org/pandas-docs/stable/user_guide/dsintro.html
+    #------------------------------------------------------------------------------
+    # Prepare Data
+    # 1) Check if data has been prepared before. 
+    # If so, load the saved data
+    # If not, save the data as CSV file to the data directory
+    if not os.path.isdir("data"):
+        os.mkdir("data")
 
-# Convert them into an array
-x_train, y_train = np.array(x_train), np.array(y_train)
-# Now, x_train is a 2D array(p,q) where p = len(scaled_data) - PREDICTION_DAYS
-# and q = PREDICTION_DAYS; while y_train is a 1D array(p)
+    data_file = os.path.join(f"data/{ticker}_{start}_{end}.csv")
 
-x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
-# We now reshape x_train into a 3D array(p, q, 1); Note that x_train 
-# is an array of p inputs with each input being a 2D array 
+    if os.path.isfile(data_file):
+        # Read the CSV data with index column being the Date
+        data = pd.read_csv(data_file, index_col=0)
+    else:
+        data = yf.download(ticker, start, end)
+        if (store_data):
+            data.to_csv(data_file)
+
+    # Handle NaN
+    data.dropna()
+
+    scaler_file = os.path.join("data/scaler.save")
+
+    if os.path.isfile(scaler_file):
+        scaler = joblib.load(scaler_file)
+    else:
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        # Note that, by default, feature_range=(0, 1). Thus, if you want a different 
+        # feature_range (min, max) then you'll need to specify it here
+        if store_scaler:
+            joblib.dump(scaler, scaler_file)
+
+    scaled_data = scaler.fit_transform(data[PRICE_VALUE].values.reshape(-1, 1)) 
+    scaled_data = scaled_data[:,0] # Turn the 2D array back to a 1D array
+    # Flatten and normalise the data
+    # First, we reshape a 1D array(n) to 2D array(n,1)
+    # We have to do that because sklearn.preprocessing.fit_transform()
+    # requires a 2D array
+    # Here n == len(scaled_data)
+    # Then, we scale the whole array to the range (0,1)
+    # The parameter -1 allows (np.)reshape to figure out the array size n automatically 
+    # values.reshape(-1, 1) 
+    # https://stackoverflow.com/questions/18691084/what-does-1-mean-in-numpy-reshape'
+    # When reshaping an array, the new shape must contain the same number of elements 
+    # as the old shape, meaning the products of the two shapes' dimensions must be equal. 
+    # When using a -1, the dimension corresponding to the -1 will be the product of 
+    # the dimensions of the original array divided by the product of the dimensions 
+    # given to reshape so as to maintain the same number of elements.
+
+    x_data = []
+    y_data = []
+
+    for x in range(PREDICTION_DAYS, len(scaled_data)):
+        x_data.append(scaled_data[x - PREDICTION_DAYS:x])
+        y_data.append(scaled_data[x])
+
+    # Convert them into an array
+    x_data, y_data = np.array(x_data), np.array(y_data)
+    # Now, x_data is a 2D array(p,q) where p = len(scaled_data) - PREDICTION_DAYS
+    # and q = PREDICTION_DAYS; while y_data is a 1D array(p)
+
+    x_data = np.reshape(x_data, (x_data.shape[0], x_data.shape[1], 1))
+    # We now reshape x_data into a 3D array(p, q, 1); Note that x_train 
+    # is an array of p inputs with each input being a 2D array 
+
+    # Split the Data by Ratio, Date, or Randomly
+    # Define the test dates according to the splitting option
+    if split_by == "ratio":
+        split_idx = int(split_pt * len(x_data))
+        x_train, x_test = x_data[:split_idx], x_data[split_idx:]
+        y_train, y_test = y_data[:split_idx], y_data[split_idx:]
+        dates = data.iloc[split_idx + PREDICTION_DAYS:].index
+
+    elif split_by == "date":
+        # Use asof to get approximate date
+        # e.g. if the given date is not reported in the DataFrame, get the closest date
+        split_idx = data.index.get_loc(data.index.asof(split_pt)) - PREDICTION_DAYS
+        x_train, x_test = x_data[:split_idx], x_data[split_idx:len(data) - PREDICTION_DAYS]
+        y_train, y_test = y_data[:split_idx], y_data[split_idx:len(data) - PREDICTION_DAYS]
+        dates = data.iloc[split_idx + PREDICTION_DAYS:].index
+
+    else:
+        x_train, x_test, y_train, y_test, train_idx, test_idx = train_test_split(x_data, y_data, range(len(x_data)))
+        dates = data.iloc[np.array(test_idx) + PREDICTION_DAYS].index
+
+    return data, x_train, y_train, x_test, y_test, scaler, dates
+
+# split_by = "random" - Default
+# data, x_train, y_train, x_test, y_test, scaler, test_dates = load_data()
+
+# split_by = "ratio"
+# data, x_train, y_train, x_test, y_test, scaler, test_dates = load_data(split_by="ratio", split_pt=0.6)
+
+# split_by = "date"
+data, x_train, y_train, x_test, y_test, scaler, dates = load_data(split_by="date", split_pt="2018-01-01")
 
 #------------------------------------------------------------------------------
 # Build the Model
@@ -184,55 +254,15 @@ model.fit(x_train, y_train, epochs=25, batch_size=32)
 # Test the model accuracy on existing data
 #------------------------------------------------------------------------------
 # Load the test data
-TEST_START = '2020-01-02'
-TEST_END = '2022-12-31'
-
-test_data = yf.download(COMPANY, start=TRAIN_START, end=TRAIN_END, progress=False)
-
-# The above bug is the reason for the following line of code
-test_data = test_data[1:]
-
-actual_prices = test_data[PRICE_VALUE].values
-
-total_dataset = pd.concat((data[PRICE_VALUE], test_data[PRICE_VALUE]), axis=0)
-
-model_inputs = total_dataset[len(total_dataset) - len(test_data) - PREDICTION_DAYS:].values
-# We need to do the above because to predict the closing price of the fisrt
-# PREDICTION_DAYS of the test period [TEST_START, TEST_END], we'll need the 
-# data from the training period
-
-model_inputs = model_inputs.reshape(-1, 1)
-# TO DO: Explain the above line
-
-model_inputs = scaler.transform(model_inputs)
-# We again normalize our closing price data to fit them into the range (0,1)
-# using the same scaler used above 
-# However, there may be a problem: scaler was computed on the basis of
-# the Max/Min of the stock price for the period [TRAIN_START, TRAIN_END],
-# but there may be a lower/higher price during the test period 
-# [TEST_START, TEST_END]. That can lead to out-of-bound values (negative and
-# greater than one)
-# We'll call this ISSUE #2
-
 # TO DO: Generally, there is a better way to process the data so that we 
 # can use part of it for training and the rest for testing. You need to 
 # implement such a way
-
-#------------------------------------------------------------------------------
-# Make predictions on test data
-#------------------------------------------------------------------------------
-x_test = []
-for x in range(PREDICTION_DAYS, len(model_inputs)):
-    x_test.append(model_inputs[x - PREDICTION_DAYS:x, 0])
-
-x_test = np.array(x_test)
-x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
-# TO DO: Explain the above 5 lines
-
 predicted_prices = model.predict(x_test)
 predicted_prices = scaler.inverse_transform(predicted_prices)
 # Clearly, as we transform our data into the normalized range (0,1),
 # we now need to reverse this transformation 
+actual_prices    = scaler.inverse_transform(y_test.reshape(-1, 1))
+
 #------------------------------------------------------------------------------
 # Plot the test predictions
 ## To do:
@@ -241,8 +271,13 @@ predicted_prices = scaler.inverse_transform(predicted_prices)
 # 3) Show chart of next few days (predicted)
 #------------------------------------------------------------------------------
 
-plt.plot(actual_prices, color="black", label=f"Actual {COMPANY} Price")
-plt.plot(predicted_prices, color="green", label=f"Predicted {COMPANY} Price")
+# Refine test dates to only YEAR for plotting
+dates = pd.to_datetime(dates)
+years = dates.year.unique()
+
+plt.plot(dates, actual_prices, color="black", label=f"Actual {COMPANY} Price")
+plt.plot(dates, predicted_prices, color="green", label=f"Predicted {COMPANY} Price")
+
 plt.title(f"{COMPANY} Share Price")
 plt.xlabel("Time")
 plt.ylabel(f"{COMPANY} Share Price")
@@ -252,8 +287,12 @@ plt.show()
 #------------------------------------------------------------------------------
 # Predict next day
 #------------------------------------------------------------------------------
-
-
+model_inputs = data[len(data) - len(y_test) - PREDICTION_DAYS:].values
+# We need to do the above because to predict the closing price of the fisrt
+# PREDICTION_DAYS of the test period [TEST_START, TEST_END], we'll need the
+# data from the training period
+model_inputs = model_inputs.reshape(-1, 1)
+# TO DO: Explain the above line
 real_data = [model_inputs[len(model_inputs) - PREDICTION_DAYS:, 0]]
 real_data = np.array(real_data)
 real_data = np.reshape(real_data, (real_data.shape[0], real_data.shape[1], 1))
