@@ -52,15 +52,15 @@ PREDICTION_DAYS = 60
 ## TO DO:
 ## 2) Use a different price value eg. mid-point of Open & Close
 ## 3) Change the Prediction days
-def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, split_by="random", split_pt=None, col="Close", store_data=True, store_scaler=True):
+def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, col="Close", split_by="random", split_pt=None, store_data=True, store_scaler=True):
     """
     Load data from Yahoo Finance source (for now) with pre-processing, scaling, normalising, and splitting
     Params:
         ticker       (str)          : The ticker to load (e.g. AMZN), default to TSLA
         start, end   (str)          : The start and end dates (training and testing inclusive)
+        col          (str)          : The column/feature/price value to feed into the model
         split_by     (str)          : The method of data splitting - date, ratio, or random, default to ratio
         split_pt     (float, str)   : The point of data splitting, e.g. ratio=0.6 (60/40 training and testing) or date="2021-01-01" (specific date)
-        col          (str)          : The column/feature/price value to feed into the model
         store_data   (bool)         : To store data locally or not
         store_scaler (bool)         : To store scalers locally or not
     
@@ -69,7 +69,7 @@ def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, sp
         x_train, y_train    : Training dataset
         x_test,  y_test     : Testing dataset
         scaler              : The scaler for inverse transformation
-        test_dates          : The test dates
+        dates               : The test dates
     """
 
     # For more details: 
@@ -84,6 +84,7 @@ def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, sp
 
     data_file = os.path.join(f"data/{ticker}_{start}_{end}.csv")
 
+    # If the CSV file is found locally
     if os.path.isfile(data_file):
         # Read the CSV data with index column being the Date
         data = pd.read_csv(data_file, index_col=0)
@@ -94,6 +95,8 @@ def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, sp
 
     # Handle NaN
     data.dropna()
+
+    print(data)
 
     scaler_file = os.path.join("data/scaler.save")
 
@@ -106,7 +109,7 @@ def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, sp
         if store_scaler:
             joblib.dump(scaler, scaler_file)
 
-    scaled_data = scaler.fit_transform(data[PRICE_VALUE].values.reshape(-1, 1)) 
+    scaled_data = scaler.fit_transform(data[col].values.reshape(-1, 1)) 
     scaled_data = scaled_data[:,0] # Turn the 2D array back to a 1D array
     # Flatten and normalise the data
     # First, we reshape a 1D array(n) to 2D array(n,1)
@@ -156,19 +159,20 @@ def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, sp
         dates = data.iloc[split_idx + PREDICTION_DAYS:].index
 
     else:
+        # The test_idx return value is the indices of the split, keeping track of the appropriate dates from the original dataset
         x_train, x_test, y_train, y_test, train_idx, test_idx = train_test_split(x_data, y_data, range(len(x_data)))
         dates = data.iloc[np.array(test_idx) + PREDICTION_DAYS].index
 
     return data, x_train, y_train, x_test, y_test, scaler, dates
 
 # split_by = "random" - Default
-# data, x_train, y_train, x_test, y_test, scaler, test_dates = load_data()
+# data, x_train, y_train, x_test, y_test, scaler, dates = load_data()
 
 # split_by = "ratio"
-# data, x_train, y_train, x_test, y_test, scaler, test_dates = load_data(split_by="ratio", split_pt=0.6)
+data, x_train, y_train, x_test, y_test, scaler, dates = load_data(split_by="ratio", split_pt=0.6)
 
 # split_by = "date"
-data, x_train, y_train, x_test, y_test, scaler, dates = load_data(split_by="date", split_pt="2018-01-01")
+# data, x_train, y_train, x_test, y_test, scaler, dates = load_data(split_by="date", split_pt="2018-01-01")
 
 #------------------------------------------------------------------------------
 # Build the Model
