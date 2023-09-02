@@ -174,6 +174,14 @@ def load_data(ticker: str="TSLA", source: str="yahoo",
     return data, x_train, y_train, x_test, y_test, scaler, dates
 
 #------------------------------------------------------------------------------
+# Store Figures as Images
+def export_fig(fig, name):
+    if not os.path.isdir("imgs"):
+        os.mkdir("imgs")
+
+    fig.write_image(f"imgs/{name}.png")
+
+#------------------------------------------------------------------------------
 # Plot Data using Candlestick Chart
 def plot_candlestick(data: pd.DataFrame, title: str, days: int=1):
     """
@@ -256,6 +264,8 @@ def plot_candlestick(data: pd.DataFrame, title: str, days: int=1):
     fig.update(layout_xaxis_rangeslider_visible=False)
     fig.show()
 
+    export_fig(fig, f"Candlestick_{COMPANY}_{days}_{title[-24:]}")
+
 #------------------------------------------------------------------------------
 # Plot Data using Boxplot Chart
 def plot_box(data: pd.DataFrame, title: str, col: str='Close', days: int=30):
@@ -302,6 +312,8 @@ def plot_box(data: pd.DataFrame, title: str, col: str='Close', days: int=30):
     fig = go.Figure(data=boxes, layout=layout)
     fig.show()
 
+    export_fig(fig, f"Box_{COMPANY}_{days}_{title[-24:]}")
+
 #------------------------------------------------------------------------------
 ## MAIN ##
 #------------------------------------------------------------------------------
@@ -315,15 +327,18 @@ def plot_box(data: pd.DataFrame, title: str, col: str='Close', days: int=30):
 data, x_train, y_train, x_test, y_test, scaler, dates = load_data(split_by="ratio", split_pt=0.5)
 print(data)
 
+start = "2022-01-01"
+end   = "2022-03-01"
+
 # The following lines are to scale the historical data to fit the testing frame
-dt_range = pd.date_range(start="2022-01-01", end="2022-03-01")
+dt_range = pd.date_range(start=start, end=end)
 data = data[data.index.isin(dt_range)]
 
 # Plot historical data using Candlestick chart
-plot_candlestick(data, f"{COMPANY} Share Price", TIME_WINDOW)
+plot_candlestick(data, f"{COMPANY} Share Price from {start} to {end}", TIME_WINDOW)
 
 # Plot historical data using Box plot
-plot_box(data, f"{COMPANY} Share Price in {TIME_WINDOW}-Day Windows", "Open", TIME_WINDOW)
+plot_box(data, f"{COMPANY} Share Price from {start} to {end}", "Open", TIME_WINDOW)
 
 #------------------------------------------------------------------------------
 # Build the Model
