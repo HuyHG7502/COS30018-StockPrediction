@@ -22,7 +22,8 @@ import pandas as pd
 import yfinance as yf
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import pandas_datareader as web
+import plotly.graph_objects as go
+import plotly.express as px
 
 import os
 import joblib
@@ -31,6 +32,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 from keras.models import Sequential
 from keras.layers import Dense, Dropout, LSTM, InputLayer
+from plotly.subplots import make_subplots
 
 #------------------------------------------------------------------------------
 # Parameters
@@ -44,15 +46,23 @@ TRAIN_END   = '2017-12-31'
 TEST_START = "2018-01-01"
 TEST_END   = "2022-12-31"
 
+TIME_WINDOW = 7
+
 # Number of days to look back to base the prediction
 PREDICTION_DAYS = 60
+
+EPOCH = 15
+BATCH = 64
 
 #------------------------------------------------------------------------------
 # Load Data
 ## TO DO:
 ## 2) Use a different price value eg. mid-point of Open & Close
 ## 3) Change the Prediction days
-def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, col="Close", split_by="random", split_pt=None, store_data=True, store_scaler=True):
+def load_data(ticker: str="TSLA", source: str="yahoo",
+              start: str=TRAIN_START, end: str=TEST_END, col: str="Close",
+              split_by: str="random", split_pt: float or str=None,
+              store_data: bool=True, store_scaler: bool=True):
     """
     Load data from Yahoo Finance source (for now) with pre-processing, scaling, normalising, and splitting
     Params:
@@ -87,7 +97,7 @@ def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, co
     # If the CSV file is found locally
     if os.path.isfile(data_file):
         # Read the CSV data with index column being the Date
-        data = pd.read_csv(data_file, index_col=0)
+        data = pd.read_csv(data_file, index_col='Date', parse_dates=True)
     else:
         data = yf.download(ticker, start, end)
         if (store_data):
@@ -95,8 +105,6 @@ def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, co
 
     # Handle NaN
     data.dropna()
-
-    print(data)
 
     scaler_file = os.path.join("data/scaler.save")
 
@@ -165,14 +173,108 @@ def load_data(ticker="TSLA", source="yahoo", start=TRAIN_START, end=TEST_END, co
 
     return data, x_train, y_train, x_test, y_test, scaler, dates
 
-# split_by = "random" - Default
+#------------------------------------------------------------------------------
+# Plot Data using Candlestick Chart
+def plot_candlestick(data: pd.DataFrame, title: str, days: int=1):
+    """
+    Visualise historical data for analysis using Candlestick chart with the option to adjust the moving window of n trading days (n >= 1)
+    Params:
+        data    (pandas.DataFrame)  : The historical data to visualise
+        title   (str)               : The title of the chart - to be consistent with Datetime, Company, etc.
+        days    (int)               : The number of trading days for each candlestick to represent
+    """
+    
+    if days > 1:
+        # Calculate the mean of each attribute over n trading days
+        # Aggregate n trading days into one data
+        data = data.resample(f'{days}D').agg({
+            'Open': 'mean',
+            'High': 'mean',
+            'Low': 'mean',
+            'Close': 'mean',
+            'Volume': 'sum'
+        }).dropna()
+
+        # Alternative: Each attribute can be calculated by their characteristics
+        # e.g
+        # - Open  - opening price of the first trading day in the range,
+        # - High  - highest price within the date range
+        # - Low   - lowest price within the date range
+        # - Close - closing price of the last trading day in the range
+        
+        #   'Open' : 'first',
+        #   'High' : 'max',
+        #   'Low'  : 'min',
+        #   'Close': 'last'
+
+    # Store start and end dates of each time window in a series
+    # For clarity purposes only
+    windows = data.index.to_series().apply(
+        lambda x: f"{x.strftime('%Y-%m-%d')} to {(x + pd.Timedelta(days=days-1)).strftime('%Y-%m-%d')}")
+
+    # Create a Candlestick chart
+    candlestick = go.Candlestick(
+        x=windows,
+        open=data['Open'],
+        high=data['High'],
+        low=data['Low'],
+        close=data['Close'],
+        showlegend=False,
+    )
+
+    volume = go.Bar(
+        x=windows,
+        y=data['Volume'],
+        marker={
+            "color": "lightgrey",
+        },
+        showlegend=False,
+    )
+    
+    # fig = go.Figure(data=[candlestick])
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.1,
+        subplot_titles=('OHLC', 'Volume'),
+        row_width=[0.3, 0.7]
+    )
+
+    fig.add_trace(candlestick, row=1, col=1)
+    fig.add_trace(volume, row=2, col=1) 
+
+    # Add labels to the chart
+    fig.update_layout(
+        title=title,
+        xaxis_title='Date',
+        yaxis_title='Price',
+    )
+
+    # Hide the slide bar
+    fig.update(layout_xaxis_rangeslider_visible=False)
+    fig.show()
+
+#------------------------------------------------------------------------------
+## MAIN ##
+#------------------------------------------------------------------------------
+## split_by = "random" - Default
 # data, x_train, y_train, x_test, y_test, scaler, dates = load_data()
 
-# split_by = "ratio"
-data, x_train, y_train, x_test, y_test, scaler, dates = load_data(split_by="ratio", split_pt=0.6)
+## split_by = "date"
+# data, x_train, y_train, x_test, y_test, scaler, dates = load_data(split_by="date", split_pt=TEST_START)
 
-# split_by = "date"
-# data, x_train, y_train, x_test, y_test, scaler, dates = load_data(split_by="date", split_pt="2018-01-01")
+## split_by = "ratio"
+data, x_train, y_train, x_test, y_test, scaler, dates = load_data(split_by="ratio", split_pt=0.5)
+print(data)
+
+# The following lines are to scale the historical data to fit the testing frame
+dt_range = pd.date_range(start="2022-01-01", end="2022-03-01")
+data = data[data.index.isin(dt_range)]
+
+# Plot historical data using Candlestick chart
+plot_candlestick(data, f"{COMPANY} Share Price", TIME_WINDOW)
 
 #------------------------------------------------------------------------------
 # Build the Model
@@ -232,7 +334,7 @@ model.compile(optimizer='adam', loss='mean_squared_error')
 
 # Now we are going to train this model with our training data 
 # (x_train, y_train)
-model.fit(x_train, y_train, epochs=25, batch_size=32)
+model.fit(x_train, y_train, epochs=EPOCH, batch_size=32)
 # Other parameters to consider: How many rounds(epochs) are we going to 
 # train our model? Typically, the more the better, but be careful about
 # overfitting!
