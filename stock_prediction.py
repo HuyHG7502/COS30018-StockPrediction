@@ -257,6 +257,52 @@ def plot_candlestick(data: pd.DataFrame, title: str, days: int=1):
     fig.show()
 
 #------------------------------------------------------------------------------
+# Plot Data using Boxplot Chart
+def plot_box(data: pd.DataFrame, title: str, col: str='Close', days: int=30):
+
+    """
+    Visualise historical data for analysis using Box plot over a moving window of n trading days (n >= 1)
+    Params:
+        data    (pandas.DataFrame)  : The historical data to visualise
+        title   (str)               : The title of the chart - to be consistent with Datetime, Company, etc.
+        col     (str)               : The column/feature to plot (e.g. Open, High, Low, Close, Volume)
+        days    (int)               : The number of trading days for each box to represent
+    """
+
+    # Use groupby() function to group DataFrame using a particular key or logic
+    # level=0 specifies grouping by DataFrame's index, which is the Date column
+    windows = data.groupby(pd.Grouper(level=0, freq=f"{days}D"))
+    
+    boxes = []
+
+    for time, window in windows:
+        # If no data in the window, skip it
+        if len(window) == 0:
+            continue
+
+        # Specify the start and end dates of each time window
+        start = window.index.min().date()
+        end   = window.index.max().date()
+
+        # Create a boxplot for each time window
+        box = go.Box(
+            y = window[col],
+            name = f"{start} to {end}"
+        )
+
+        boxes.append(box)
+
+    layout = go.Layout(
+        title=title,
+        xaxis_title="Date",
+        yaxis_title=f"{col} Prices",
+        boxmode='group'
+    )
+
+    fig = go.Figure(data=boxes, layout=layout)
+    fig.show()
+
+#------------------------------------------------------------------------------
 ## MAIN ##
 #------------------------------------------------------------------------------
 ## split_by = "random" - Default
@@ -275,6 +321,9 @@ data = data[data.index.isin(dt_range)]
 
 # Plot historical data using Candlestick chart
 plot_candlestick(data, f"{COMPANY} Share Price", TIME_WINDOW)
+
+# Plot historical data using Box plot
+plot_box(data, f"{COMPANY} Share Price in {TIME_WINDOW}-Day Windows", "Open", TIME_WINDOW)
 
 #------------------------------------------------------------------------------
 # Build the Model
