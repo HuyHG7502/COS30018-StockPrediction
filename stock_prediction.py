@@ -34,7 +34,7 @@ from sklearn.preprocessing import MinMaxScaler
 from keras.utils import plot_model
 from keras.models import Sequential, load_model
 from keras.layers import Dense, Dropout, LSTM, GRU, SimpleRNN, Bidirectional
-from keras.callbacks import ModelCheckpoint
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from plotly.subplots import make_subplots
 
 #------------------------------------------------------------------------------
@@ -50,19 +50,20 @@ TRAIN_START = '2010-01-01'
 TRAIN_END   = '2017-12-31'
 
 TEST_START = "2018-01-01"
-TEST_END   = "2022-12-31"
+TEST_END   = "2023-01-10"
 
 WINDOW = 30
 
 # Number of days to look back to base the prediction
-PREDICTION_DAYS = 60
+N_LOOKUP = 60
+N_STEPS  = 10
 
 EPOCH = 50
 BATCH = 50
 
-CELL = SimpleRNN
-UNITS = 100
-LAYERS = 5
+CELL = LSTM
+UNITS = 150
+LAYERS = 2
 DROPOUT = 0.3
 BIDIRECTIONAL = True
 
@@ -80,21 +81,22 @@ random.seed(75)
 ## TO DO:
 ## 2) Use a different price value eg. mid-point of Open & Close
 ## 3) Change the Prediction days
-def load_data(ticker=TICKER, col=FEATURE,
+def load_data(ticker=TICKER, cols=FEATURES,
+              n_lookup=N_LOOKUP, n_steps=N_STEPS,
               start=TRAIN_START, end=TEST_END,
               split_by="random", split_pt=None,
-              store_scaler=True, store_data=True):
+              store_data=True, store_scaler=True):
     """
     Load data from Yahoo Finance source (for now) with pre-processing, scaling, normalising, and splitting
     Params:
         ticker       (str, pd.DataFrame) : The ticker to load (e.g. AMZN), default to TSLA - or the loaded data
         start, end   (str)               : The start and end dates (training and testing inclusive)
-        col          (str)               : The column feature to feed into the model
+        cols         ([str])             : The column features to feed into the model
         split_by     (str)               : The method of data splitting - date, ratio, or random, default to ratio
         split_pt     (float, str)        : The point of data splitting, e.g. ratio=0.6 (60/40 training and testing) or date="2021-01-01" (specific date)
         store_data   (bool)              : To store data locally or not
         store_scaler (bool)              : To store scalers locally or not
-    
+
     Returns:
         result - a dictionary with various components: dataframe, scalers, training, and  testing data.
     """
@@ -135,21 +137,26 @@ def load_data(ticker=TICKER, col=FEATURE,
     result["df"] = data.copy()
 
     #------------------------------------------------------------------------------
-    scaler_file = os.path.join("data", f"/scaler_{ticker}_{col}_{start}_{end}.save")
+    scalers = {}
 
-    if os.path.isfile(scaler_file):
-        scaler = joblib.load(scaler_file)
-    else:
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        # Note that, by default, feature_range=(0, 1). Thus, if you want a different 
-        # feature_range (min, max) then you'll need to specify it here
-        if store_scaler:
-            joblib.dump(scaler, scaler_file)
+    for col in cols:
+        scaler_file = os.path.join(f"data/scaler_{ticker}_{col}_{start}_{end}.save")
 
-    result["scaler"] = scaler
+        if os.path.isfile(scaler_file):
+            scaler = joblib.load(scaler_file)
+        else:
+            scaler = MinMaxScaler(feature_range=(0, 1))
+            # Note that, by default, feature_range=(0, 1). Thus, if you want a different 
+            # feature_range (min, max) then you'll need to specify it here
+            if store_scaler:
+                joblib.dump(scaler, scaler_file)
 
-    scaled_data = scaler.fit_transform(data[col].values.reshape(-1, 1))
-    scaled_data = scaled_data[:, 0]
+        data[col] = scaler.fit_transform(data[col].values.reshape(-1, 1))
+        scalers[col] = scaler
+
+    result["scalers"] = scalers
+
+    scaled_data = data[cols].values
 
     #------------------------------------------------------------------------------
     # Flatten and normalise the data
@@ -169,18 +176,19 @@ def load_data(ticker=TICKER, col=FEATURE,
 
     x_data, y_data, dates = [], [], []
 
-    for i in range(PREDICTION_DAYS, len(scaled_data)):
-        x_data.append(scaled_data[i - PREDICTION_DAYS:i])
-        y_data.append(scaled_data[i])
-        
+    for i in range(n_lookup, len(scaled_data) - n_steps + 1):
+        x_data.append(scaled_data[i - n_lookup:i])
+        y_data.append(scaled_data[i:i + n_steps, FEATURES.index(FEATURE)])
+
         dates.append(data.index[i])
 
     # Convert them into an array
     x_data, y_data = np.array(x_data), np.array(y_data)
-    # Now, x_data is a 2D array(p,q) where p = len(scaled_data) - PREDICTION_DAYS
-    # and q = PREDICTION_DAYS; while y_data is a 1D array(p)
+    # Now, x_data is a 2D array(p,q) where p = len(scaled_data) - N_LOOKUP
+    # and q = N_LOOKUP; while y_data is a 1D array(p)
 
-    x_data = np.reshape(x_data, (x_data.shape[0], x_data.shape[1], 1))
+    x_data = np.reshape(x_data, (x_data.shape[0], x_data.shape[1], len(cols)))
+    y_data = np.reshape(y_data, (y_data.shape[0], y_data.shape[1]))
     # We now reshape x_data into a 3D array(p, q, 1); Note that x_train 
     # is an array of p inputs with each input being a 2D array 
 
@@ -361,7 +369,7 @@ def plot_box(data: pd.DataFrame, title: str, col: str='Close', days: int=30):
 #------------------------------------------------------------------------------
 # Create the Model 
 def create_model(cell=CELL, units=UNITS,
-                 n_features=1, n_layers=LAYERS, n_steps=PREDICTION_DAYS,
+                 n_features=len(FEATURES), n_layers=LAYERS, n_steps=N_LOOKUP,
                  dropout=DROPOUT, loss=LOSS, optimizer=OPTIMIZER, bidirectional=BIDIRECTIONAL):
     
     """
@@ -403,7 +411,7 @@ def create_model(cell=CELL, units=UNITS,
         model.add(Dropout(dropout))
 
     # Output layer
-    model.add(Dense(1, activation="linear"))
+    model.add(Dense(N_STEPS, activation="linear"))
     # Compile the model
     model.compile(loss=loss, metrics=["mean_absolute_error"], optimizer=optimizer)
 
@@ -419,11 +427,75 @@ def refine_model(model, path, x_test, y_test):
     if (loss_best > loss_test):
         model.load_weights(f"{path}-test.h5")
     
-    # model.save(f"{path}.h5")
+    model.save(f"{path}.h5")
 
-    plot_model(model, to_file=f"{model_file}.png", show_shapes=True, show_layer_names=True)
+    # plot_model(model, to_file=f"{model_file}.png", show_shapes=True, show_layer_names=True)
 
     return model
+
+#------------------------------------------------------------------------------
+# Plot the Graph
+def plot(dates, actual, predicted):
+    plt.plot(dates, actual[:, 0], color="black", label=f"Actual {TICKER} Price")
+    plt.plot(dates, predicted[:, 0], color="green", label=f"Predicted {TICKER} Price")
+
+    plt.title(f"{TICKER} Share Price")
+    plt.xlabel("Time")
+    plt.ylabel(f"{TICKER} Share Price")
+    plt.legend()
+    plt.show()
+
+#------------------------------------------------------------------------------
+# Predict Next Day
+def predict(model, data):
+    model_inputs = data['df'][len(data['df']) - len(data['y_test']) - N_LOOKUP:].copy()
+    for feature in FEATURES:
+        model_inputs.loc[:, feature] = data['scalers'][feature].transform(model_inputs[feature].values.reshape(-1, 1))
+
+    # model_inputs = model_inputs.reshape(-1, 1)
+    # model_inputs = data['scaler'].transform(model_inputs)
+
+    # TO DO: Explain the above line
+    real_data = model_inputs.iloc[-N_LOOKUP:].values
+    real_data = np.expand_dims(real_data, axis=0)
+
+    predictions = model.predict(real_data)
+    predictions = data['scalers'][FEATURE].inverse_transform(predictions)
+
+    for i in range(N_STEPS):
+        print(f"Prediction Day {i+1}:\t{predictions[0][i]:.2f}")
+
+def predict_rf(model, data):
+    predictions = []
+    
+    model_inputs = data['df'][len(data['df']) - len(data['y_test']) - N_LOOKUP:].copy()
+    # Scale the input data
+    for feature in FEATURES:
+            model_inputs.loc[:, feature] = data['scalers'][feature].transform(model_inputs[feature].values.reshape(-1, 1))
+
+    for i in range(N_STEPS):
+        # Extract the sequence for prediction
+        model_input = model_inputs.iloc[-N_LOOKUP:].values
+        model_input = np.expand_dims(model_input, axis=0)
+
+        # Make a prediction for the next day
+        prediction = model.predict(model_input)
+
+        # Create a new DataFrame entry for the predicted day
+        entry = pd.DataFrame(columns=FEATURES, index=[model_inputs.index[-1] + pd.DateOffset(1)])
+        # Use the predicted value if the feature is being predicted, otherwise duplicate the last day's value
+        for feature in FEATURES:
+            entry[feature] = prediction[0][0] if feature == FEATURE else model_inputs.iloc[-1][FEATURE]
+
+        # Concatenate the new entry to the original DataFrame
+        model_inputs = pd.concat([model_inputs, entry])
+
+        # Inverse transform the prediction and append it to the predictions list
+        prediction = data['scalers'][FEATURE].inverse_transform(prediction)
+        predictions.append(prediction[0][0])
+
+    for i, prediction in enumerate(predictions):
+        print(f"Prediction Day {i+1}:\t{prediction:.2f}")
 
 #------------------------------------------------------------------------------
 ## MAIN ##
@@ -436,6 +508,8 @@ def refine_model(model, path, x_test, y_test):
 
 ## split_by = "ratio"
 data = load_data(split_by="ratio", split_pt=0.6)
+
+print(data['df'].tail(10))
 
 PLOT_START = "2022-01-01"
 PLOT_END   = "2022-12-31"
@@ -466,7 +540,7 @@ plot_data = data["df"][data["df"].index.isin(plot_date)]
 # in the future, when you want to make the prediction, you only need to load
 # your pre-trained model and run it on the new input for which the prediction
 # need to be made.
-model_file = os.path.join("results", f"{TICKER}_{TRAIN_START}-{TEST_END}_{CELL.__name__}_{LOSS}_{OPTIMIZER}_seq-{PREDICTION_DAYS}_layers-{LAYERS}_units-{UNITS}")
+model_file = os.path.join("results", f"{TICKER}_{TRAIN_START}-{TEST_END}_{CELL.__name__}_{LOSS}_{OPTIMIZER}_seq-{N_LOOKUP}_layers-{LAYERS}_units-{UNITS}")
 
 if os.path.isfile(f"{model_file}.h5"):
     model = load_model(f"{model_file}.h5")
@@ -479,6 +553,7 @@ else:
     # optimizer='rmsprop'/'sgd'/'adadelta'/...
     # loss='mean_absolute_error'/'huber_loss'/'cosine_similarity'/...
     
+    # reducer = ReduceLROnPlateau(monitor="val_loss", factor=0.1, patience=10, min_lr=0.0001)
     checkpointer = ModelCheckpoint(f"{model_file}-best.h5",
                                    save_weights_only=True, save_best_only=True,
                                    monitor="val_loss", mode="min")
@@ -512,10 +587,10 @@ else:
 # can use part of it for training and the rest for testing. You need to 
 # implement such a way
 predicted_prices = model.predict(data['x_test'])
-predicted_prices = data['scaler'].inverse_transform(predicted_prices)
+predicted_prices = np.squeeze(data['scalers'][FEATURE].inverse_transform(predicted_prices))
 # Clearly, as we transform our data into the normalized range (0,1),
 # we now need to reverse this transformation 
-actual_prices = data['scaler'].inverse_transform(data['y_test'].reshape(-1, 1))
+actual_prices = np.squeeze(data['scalers'][FEATURE].inverse_transform(data['y_test']))
 
 #------------------------------------------------------------------------------
 # Plot the test predictions
@@ -529,35 +604,12 @@ actual_prices = data['scaler'].inverse_transform(data['y_test'].reshape(-1, 1))
 # dates = pd.to_datetime(data['d_test'])
 # years = dates.year.un#ique()
 
-plt.plot(data['d_test'], actual_prices, color="black", label=f"Actual {TICKER} Price")
-plt.plot(data['d_test'], predicted_prices, color="green", label=f"Predicted {TICKER} Price")
-
-plt.title(f"{TICKER} Share Price")
-plt.xlabel("Time")
-plt.ylabel(f"{TICKER} Share Price")
-plt.legend()
-plt.show()
+plot(data['d_test'], actual_prices, predicted_prices)
 
 #------------------------------------------------------------------------------
 # Predict next day
 #------------------------------------------------------------------------------
-model_inputs = data['df'][len(data['df']) - len(data['y_test']) - PREDICTION_DAYS:][FEATURE].values
-# We need to do the above because to predict the closing price of the first
-# PREDICTION_DAYS of the test period [TEST_START, TEST_END], we'll need the
-# data from the training period
-model_inputs = data['scaler'].fit_transform(model_inputs.reshape(-1, 1))
-
-# model_inputs = model_inputs.reshape(-1, 1)
-# model_inputs = data['scaler'].transform(model_inputs)
-
-# TO DO: Explain the above line
-real_data = [model_inputs[len(model_inputs) - PREDICTION_DAYS:, 0]]
-real_data = np.array(real_data)
-real_data = np.reshape(real_data, (real_data.shape[0], real_data.shape[1], 1))
-
-prediction = model.predict(real_data)
-prediction = data['scaler'].inverse_transform(prediction)[0][0]
-print(f"Prediction: {prediction:.2f}")
+predict(model, data)
 
 # A few concluding remarks here:
 # 1. The predictor is quite bad, especially if you look at the next day prediction,
