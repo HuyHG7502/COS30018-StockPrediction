@@ -662,22 +662,22 @@ arima_model  = train_arima_model(data)
 #------------------------------------------------------------------------------
 # Test the model accuracy on existing data
 # data['df_pred_n'] = predict_neural(neural_model, data['x_test'], data['d_test'], data['scalers'])
-data['df_pred_a'] = predict_arima(arima_model, data['df_test'], data['df_test'].index)
+# data['df_pred_a'] = predict_arima(arima_model, data['df_test'], data['df_test'].index)
 
 # Plot the Data
-plot_candlestick(data['df_test'], data['df_pred_a'], days=7)
+# plot_candlestick(data['df_test'], data['df_pred_a'], days=7)
 # plot_box(data['df_test'], data['df_pred'], days=7)
 
 #------------------------------------------------------------------------------
 # Predict next days
-# dates = pd.date_range(data['df'].index[-1] + timedelta(days=1), periods=N_STEPS, name='Date')
-# data['df_pred_n'] = predict_neural(neural_model, data['model_inputs'], dates, data['scalers'])
-# data['df_pred_a'] = predict_arima(arima_model,  data['df_test'].tail(N_STEPS), dates)
+dates = pd.date_range(data['df'].index[-1] + timedelta(days=1), periods=N_STEPS, name='Date')
+data['df_pred_n'] = predict_neural(neural_model, data['model_inputs'], dates, data['scalers'])
+data['df_pred_a'] = predict_arima(arima_model,  data['df_test'].tail(N_STEPS), dates)
 
-# data['model_outputs'] = predict_ensemble(data['df_pred_n'], data['df_pred_a'])
+data['model_outputs'] = predict_ensemble(data['df_pred_n'], data['df_pred_a'])
 
-# for i, price in enumerate(data['model_outputs']):
-#     print(f"Predicted {FEATURE} Price for Day {i + 1}: ${price:.2f}")
+for i, price in enumerate(data['model_outputs']):
+    print(f"Predicted {FEATURE} Price for Day {i + 1}: ${price:.2f}")
 
 # A few concluding remarks here:
 # 1. The predictor is quite bad, especially if you look at the next day prediction,
