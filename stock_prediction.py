@@ -1,7 +1,7 @@
 # File: stock_prediction.py
 # Authors: Cheong Koo and Bao Vo
 # Date: 14/07/2021 (v1); 19/07/2021 (v2); 25/07/2023 (v3)
-# Date: 26/08/2023 (v4) by Gia Huy Huynh
+# Date: 26/09/2023 (v4) by Gia Huy Huynh
 
 # Code modified from:
 # Title: Predicting Stock Prices with Python
@@ -23,19 +23,24 @@ import yfinance as yf
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
-import plotly.express as px
+import pmdarima as pm
 
 import os
 import joblib
 import random
 
+from datetime import datetime, timedelta
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.ensemble import RandomForestRegressor
 from keras.utils import plot_model
 from keras.models import Sequential, load_model
-from keras.layers import Dense, Dropout, LSTM, GRU, SimpleRNN, Bidirectional
+from keras.layers import Dense, Dropout, LSTM, GRU, SimpleRNN, Bidirectional, Reshape
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from plotly.subplots import make_subplots
+
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.api import adfuller
 
 #------------------------------------------------------------------------------
 # Parameters
@@ -43,8 +48,7 @@ DATA_SOURCE = "yahoo"
 TICKER      = "TSLA"
 
 FEATURES = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
-# FEATURES = ["Close"]
-FEATURE = "Close"
+FEATURE  = "Close"
 
 TRAIN_START = '2010-01-01'
 TRAIN_END   = '2017-12-31'
@@ -55,20 +59,28 @@ TEST_END   = "2023-01-10"
 WINDOW = 30
 
 # Number of days to look back to base the prediction
-N_LOOKUP = 60
-N_STEPS  = 10
+N_LOOKUP = 120
+N_STEPS  = 7
 
 EPOCH = 50
 BATCH = 50
 
-CELL = LSTM
-UNITS = 150
-LAYERS = 2
-DROPOUT = 0.3
+CELL = GRU
+LAYERS = [50, 50]
+DROPOUT = 0.2
 BIDIRECTIONAL = True
 
 LOSS = "huber_loss"
 OPTIMIZER = "adam"
+
+DATA_DIR = "data"
+MODEL_DIR = "model"
+RESULT_DIR = "result"
+
+ORDER = (5, 1, 1)
+
+N_ESTIMATORS = 100
+N_RANDOM = 75
 
 #------------------------------------------------------------------------------
 # Set seed so the same results are achieved for several runs 
@@ -77,70 +89,91 @@ tf.random.set_seed(75)
 random.seed(75)
 
 #------------------------------------------------------------------------------
-# Load Data
-## TO DO:
-## 2) Use a different price value eg. mid-point of Open & Close
-## 3) Change the Prediction days
-def load_data(ticker=TICKER, cols=FEATURES,
-              n_lookup=N_LOOKUP, n_steps=N_STEPS,
-              start=TRAIN_START, end=TEST_END,
-              split_by="random", split_pt=None,
-              store_data=True, store_scaler=True):
+# Load and Process Data
+def load_data(ticker=TICKER, start=TRAIN_START, end=TEST_END, store_data=True):
     """
-    Load data from Yahoo Finance source (for now) with pre-processing, scaling, normalising, and splitting
+    Load data from Yahoo Finance source.
     Params:
-        ticker       (str, pd.DataFrame) : The ticker to load (e.g. AMZN), default to TSLA - or the loaded data
-        start, end   (str)               : The start and end dates (training and testing inclusive)
-        cols         ([str])             : The column features to feed into the model
-        split_by     (str)               : The method of data splitting - date, ratio, or random, default to ratio
-        split_pt     (float, str)        : The point of data splitting, e.g. ratio=0.6 (60/40 training and testing) or date="2021-01-01" (specific date)
+        ticker       (str, pd.DataFrame) : The ticker to load (e.g. AMZN) or the loaded data
+        start, end   (str)               : The start and end dates for the data
         store_data   (bool)              : To store data locally or not
-        store_scaler (bool)              : To store scalers locally or not
 
     Returns:
-        result - a dictionary with various components: dataframe, scalers, training, and  testing data.
+        df          (pd.DataFrame)      : The loaded dataframe
     """
 
-    # For more details: 
-    # https://pandas.pydata.org/pandas-docs/stable/user_guide/dsintro.html
-    #------------------------------------------------------------------------------
-    # Prepare Data
-    # 1) Check if data has been prepared before. 
-    # If so, load the saved data
-    # If not, save the data as CSV file to the data directory
-    
-    result = {}
+    # Create the data directory if it doesn't already exist
+    if not os.path.isdir(DATA_DIR):
+        os.mkdir(DATA_DIR)
 
     # Check if the ticker is already a loaded stock from Yahoo Finance
     # If yes, use it directly as data
     if isinstance(ticker, pd.DataFrame):
-        data = ticker
+        df = ticker
     # If not, load it from yfinance or local CSV
     elif isinstance(ticker, str):
-        data_file = os.path.join("data", f"{ticker}_{start}_{end}.csv")
+        data_file = os.path.join(DATA_DIR, f"{ticker}_{start}_{end}.csv")
+
         # If the CSV file is found locally
         if os.path.isfile(data_file):
             # Read the CSV data with index column being the Date
-            data = pd.read_csv(data_file, index_col='Date', parse_dates=True)
+            df = pd.read_csv(data_file, index_col='Date', parse_dates=True)
         else:
-            data = yf.download(ticker, start, end)
+            df = yf.download(ticker, start, end)
     else:
         raise TypeError("ticker must be either a `str` or a `pd.DataFrame` instance.")
 
     # Handle NaN
-    data.dropna(inplace=True)
+    df.dropna(inplace=True)
 
     # Store data as local CSV
     if store_data:
-        data.to_csv(data_file)
+        df.to_csv(data_file)
     
-    result["df"] = data.copy()
+    return df
 
-    #------------------------------------------------------------------------------
+def prepare_data(df, cols=FEATURES,
+                 n_lookup=N_LOOKUP, n_steps=N_STEPS,
+                 split_by="random", split_pt=None, store_scaler=True):
+    """
+    Pre-process the data: scaling, normalising, and splitting
+    Params:
+        df           (pd.DataFrame)  : The dataframe to be processed
+        cols         (list)          : The column features to feed into the model
+        n_lookup     (int)           : The days in the past to base prediction on (historical sequence length)
+        n_steps      (int)           : The days in the future to make prediction for
+        split_by     (str)           : The method of data splitting - date, ratio, or random, default to ratio
+        split_pt     (float, str)    : The point of data splitting, e.g. ratio=0.6 (60/40 training and testing) or date="2021-01-01" (specific date)
+        store_data   (bool)          : To store data locally or not
+
+    Returns:
+        result       (dict)          : The resulting dictionary containing various components
+
+    """
+
+    for col in cols:
+        assert col in df.columns, f'Invalid {col} column in the dataframe.'
+
+    assert split_by in ['random', 'ratio', 'date'], f"Invalid split method. Expected 'random', 'ratio', 'date'."
+    
+    if split_by == "ratio":
+        split_idx = int(split_pt * len(df))
+
+        df_train = df[:split_idx]
+        df_test  = df[split_idx:]
+
+    elif split_by == "date":
+        df_train = df[df.index < split_pt]
+        df_test  = df[df.index > split_pt]
+
+    else:
+        df_train, df_test  = train_test_split(df)
+
+    data = df.copy()
     scalers = {}
 
     for col in cols:
-        scaler_file = os.path.join(f"data/scaler_{ticker}_{col}_{start}_{end}.save")
+        scaler_file = os.path.join(DATA_DIR, f"scaler_{col}.save")
 
         if os.path.isfile(scaler_file):
             scaler = joblib.load(scaler_file)
@@ -154,270 +187,132 @@ def load_data(ticker=TICKER, cols=FEATURES,
         data[col] = scaler.fit_transform(data[col].values.reshape(-1, 1))
         scalers[col] = scaler
 
-    result["scalers"] = scalers
-
     scaled_data = data[cols].values
 
     #------------------------------------------------------------------------------
-    # Flatten and normalise the data
-    # First, we reshape a 1D array(n) to 2D array(n,1)
-    # We have to do that because sklearn.preprocessing.fit_transform()
-    # requires a 2D array
-    # Here n == len(scaled_data)
-    # Then, we scale the whole array to the range (0,1)
-    # The parameter -1 allows (np.)reshape to figure out the array size n automatically 
-    # values.reshape(-1, 1) 
-    # https://stackoverflow.com/questions/18691084/what-does-1-mean-in-numpy-reshape'
-    # When reshaping an array, the new shape must contain the same number of elements 
-    # as the old shape, meaning the products of the two shapes' dimensions must be equal. 
-    # When using a -1, the dimension corresponding to the -1 will be the product of 
-    # the dimensions of the original array divided by the product of the dimensions 
-    # given to reshape so as to maintain the same number of elements.
+    x_train, y_train, d_train = [], [], []
 
-    x_data, y_data, dates = [], [], []
+    for i in range(n_lookup, len(df_train) - n_steps + 1):
+        x_train.append(scaled_data[i - n_lookup: i])
+        y_train.append(scaled_data[i:i + n_steps])
+        d_train.append(df.index[i])
 
-    for i in range(n_lookup, len(scaled_data) - n_steps + 1):
-        x_data.append(scaled_data[i - n_lookup:i])
-        y_data.append(scaled_data[i:i + n_steps, FEATURES.index(FEATURE)])
-
-        dates.append(data.index[i])
-
-    # Convert them into an array
-    x_data, y_data = np.array(x_data), np.array(y_data)
-    # Now, x_data is a 2D array(p,q) where p = len(scaled_data) - N_LOOKUP
-    # and q = N_LOOKUP; while y_data is a 1D array(p)
-
-    x_data = np.reshape(x_data, (x_data.shape[0], x_data.shape[1], len(cols)))
-    y_data = np.reshape(y_data, (y_data.shape[0], y_data.shape[1]))
-    # We now reshape x_data into a 3D array(p, q, 1); Note that x_train 
-    # is an array of p inputs with each input being a 2D array 
-
-    # Split the Data by Ratio, Date, or Randomly
-    # Define the test dates according to the splitting option
-    if split_by not in ['random', 'ratio', 'date']:
-        raise ValueError("Invalid split method. Expected 'random', 'ratio', 'date'.")
+    x_test, y_test, d_test = [], [], []
     
-    if split_by == "ratio":
-        split_idx = int(split_pt * len(x_data))
-        result['x_train'], result['x_test'] = x_data[:split_idx], x_data[split_idx:]
-        result['y_train'], result['y_test'] = y_data[:split_idx], y_data[split_idx:]
-        result['d_train'], result['d_test'] = dates[:split_idx], dates[split_idx:]
+    for i in range(len(df_train), len(df) - n_steps + 1):
+        x_test.append(scaled_data[i - n_lookup: i])
+        y_test.append(scaled_data[i:i + n_steps])
+        d_test.append(df.index[i])
 
-    elif split_by == "date":
-        # Use asof to get approximate date
-        # e.g. if the given date is not reported in the DataFrame, get the closest date
-        split_pt  = pd.Index(dates).asof(split_pt)
-        split_idx = pd.Index(dates).get_loc(split_pt)
-        result['x_train'], result['x_test'] = x_data[:split_idx], x_data[split_idx:]
-        result['y_train'], result['y_test'] = y_data[:split_idx], y_data[split_idx:]
-        result['d_train'], result['d_test'] = dates[:split_idx], dates[split_idx:]
+         
+    x_train, y_train = np.array(x_train), np.array(y_train)
+    x_test,  y_test  = np.array(x_test),  np.array(y_test)
 
-    else:
-        # The test_idx return value is the indices of the split, keeping track of the appropriate dates from the original dataset
-        result['x_train'], result['x_test'], result['y_train'], result['y_test'], train_idx, test_idx = train_test_split(x_data, y_data, range(len(x_data)))
-        result['d_train'] = [dates[i] for i in train_idx]
-        result['d_test']  = [dates[i] for i in test_idx]
+    model_inputs = x_test[-1]
+    model_inputs = np.reshape(model_inputs, (1, n_lookup, len(cols)))
 
-    result['test_df'] = result['df'].loc[dates]
-        
-    return result
+    return {
+        'df'           : df.copy(),
+        'scalers'      : scalers,
+        'df_train'     : df_train,
+        'df_test'      : df_test,
+        'x_train'      : x_train,
+        'y_train'      : y_train,
+        'x_test'       : x_test,
+        'y_test'       : y_test,
+        'd_train'      : d_train,
+        'd_test'       : d_test,
+        'model_inputs' : model_inputs
+    }
 
 #------------------------------------------------------------------------------
-# Store Figures as Images
-def export_fig(fig, name):
-    if not os.path.isdir("imgs"):
-        os.mkdir("imgs")
-
-    fig.write_image(f"imgs/{name}.png")
-
-#------------------------------------------------------------------------------
-# Plot Data using Candlestick Chart
-def plot_candlestick(data: pd.DataFrame, title: str, days: int=1):
+# Create AI Models for Prediction
+def create_neural_model(cell=CELL, layers=LAYERS,
+                        n_steps=N_STEPS, n_lookup=N_LOOKUP, n_features=len(FEATURES),
+                        dropout=DROPOUT, loss=LOSS, optimizer=OPTIMIZER, bidirectional=BIDIRECTIONAL):
     """
-    Visualise historical data for analysis using Candlestick chart with the option to adjust the moving window of n trading days (n >= 1)
-    Params:
-        data    (pandas.DataFrame)  : The historical data to visualise
-        title   (str)               : The title of the chart - to be consistent with Datetime, TICKER, etc.
-        days    (int)               : The number of trading days for each candlestick to represent
-    """
-    
-    if days > 1:
-        # Calculate the mean of each attribute over n trading days
-        # Aggregate n trading days into one data
-        data = data.resample(f'{days}D').agg({
-            'Open': 'mean',
-            'High': 'mean',
-            'Low': 'mean',
-            'Close': 'mean',
-            'Volume': 'sum'
-        }).dropna()
-
-        # Alternative: Each attribute can be calculated by their characteristics
-        # e.g
-        # - Open  - opening price of the first trading day in the range,
-        # - High  - highest price within the date range
-        # - Low   - lowest price within the date range
-        # - Close - closing price of the last trading day in the range
-        
-        #   'Open' : 'first',
-        #   'High' : 'max',
-        #   'Low'  : 'min',
-        #   'Close': 'last'
-
-    # Store start and end dates of each time window in a series
-    # For clarity purposes only
-    windows = data.index.to_series().apply(
-        lambda x: f"{x.strftime('%Y-%m-%d')} to {(x + pd.Timedelta(days=days-1)).strftime('%Y-%m-%d')}")
-
-    # Create a Candlestick chart
-    candlestick = go.Candlestick(
-        x=windows,
-        open=data['Open'],
-        high=data['High'],
-        low=data['Low'],
-        close=data['Close'],
-        showlegend=False,
-    )
-
-    volume = go.Bar(
-        x=windows,
-        y=data['Volume'],
-        marker={
-            "color": "lightgrey",
-        },
-        showlegend=False,
-    )
-    
-    # fig = go.Figure(data=[candlestick])
-
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.1,
-        subplot_titles=('OHLC', 'Volume'),
-        row_width=[0.3, 0.7]
-    )
-
-    fig.add_trace(candlestick, row=1, col=1)
-    fig.add_trace(volume, row=2, col=1) 
-
-    # Add labels to the chart
-    fig.update_layout(
-        title=title,
-        xaxis_title='Date',
-        yaxis_title='Price',
-    )
-
-    # Hide the slide bar
-    fig.update(layout_xaxis_rangeslider_visible=False)
-    fig.show()
-
-    # Export figure as PNG
-    # export_fig(fig, f"Candlestick_{TICKER}_{days}_{title[-24:]}")
-
-#------------------------------------------------------------------------------
-# Plot Data using Boxplot Chart
-def plot_box(data: pd.DataFrame, title: str, col: str='Close', days: int=30):
-
-    """
-    Visualise historical data for analysis using Box plot over a moving window of n trading days (n >= 1)
-    Params:
-        data    (pandas.DataFrame)  : The historical data to visualise
-        title   (str)               : The title of the chart - to be consistent with Datetime, TICKER, etc.
-        col     (str)               : The column/feature to plot (e.g. Open, High, Low, Close, Volume)
-        days    (int)               : The number of trading days for each box to represent
-    """
-
-    # Use groupby() function to group DataFrame using a particular key or logic
-    # level=0 specifies grouping by DataFrame's index, which is the Date column
-    windows = data.groupby(pd.Grouper(level=0, freq=f"{days}D"))
-    
-    boxes = []
-
-    for time, window in windows:
-        # If no data in the window, skip it
-        if len(window) == 0:
-            continue
-
-        # Specify the start and end dates of each time window
-        start = window.index.min().date()
-        end   = window.index.max().date()
-
-        # Create a boxplot for each time window
-        box = go.Box(
-            y = window[col],
-            name = f"{start} to {end}",
-            # boxpoints="all"
-        )
-
-        boxes.append(box)
-
-    layout = go.Layout(
-        title=title,
-        xaxis_title="Date",
-        yaxis_title=f"{col} Prices",
-        boxmode='group'
-    )
-
-    fig = go.Figure(data=boxes, layout=layout)
-    fig.show()
-
-    # Export figure as PNG
-    # export_fig(fig, f"Box_{TICKER}_{days}_{title[-24:]}")
-
-#------------------------------------------------------------------------------
-# Create the Model 
-def create_model(cell=CELL, units=UNITS,
-                 n_features=len(FEATURES), n_layers=LAYERS, n_steps=N_LOOKUP,
-                 dropout=DROPOUT, loss=LOSS, optimizer=OPTIMIZER, bidirectional=BIDIRECTIONAL):
-    
-    """
-    Create a Deep Learning Model based on given parameters
+    Create a Neural Network / Deep Learning Model based on given parameters
     Params:
         cell            (LSTM | GRU ! SimpleRNN)   : The type of RNN cell to train the model          - Default is LSTM
         units           (int)                      : The number of units (neurons) for each RNN layer - Default is 100
         n_features      (int)                      : The number of features in the input data         - Default is 1
         n_layers        (int)                      : The number of RNN layers in the model            - Default is 2
-        n_steps         (int)                      : The number of time steps in each input sequence
+        n_lookup        (int)                      : The number of time steps in each input sequence
         dropout         (float)                    : The dropout rate for regularisation to prevent overfitting
         loss            (str)                      : The loss function to be used during training
         optimizer       (str)                      : The optimisation algorithm to be used during training
         bidirectional   (bool)                     : Whether to use bidirectional RNN layers
-
-    Returns:
-        model - a compiled deep learning model from keras.Model
     """
+    
     model = Sequential()
-    for i in range(n_layers):
+    for layer, size in enumerate(layers):
         # Determine if this is the first, last, or hidden layers
-        is_first = (i == 0)
-        is_last  = (i == n_layers - 1)
+        is_first = layer == 0
+        is_last  = layer == len(layers) - 1
 
         if bidirectional:
             if is_first:
                 # Specify the input shape for the first layer
-                model.add(Bidirectional(cell(units, return_sequences=True, input_shape=(n_steps, n_features))))
+                model.add(Bidirectional(cell(size, return_sequences=True, input_shape=(n_lookup, n_features))))
             else:
                 # Return sequences for all layers except the last
-                model.add(Bidirectional(cell(units, return_sequences=(not is_last))))
+                model.add(Bidirectional(cell(size, return_sequences=(not is_last))))
         else:
             if is_first:
-                model.add(cell(units, return_sequences=True, input_shape=(n_steps, n_features)))
+                model.add(cell(size, return_sequences=True, input_shape=(n_lookup, n_features)))
             else:
-                model.add(cell(units, return_sequences=(not is_last)))
+                model.add(cell(size, return_sequences=(not is_last)))
         
         # Add Dropout after each layer for regularisation
         model.add(Dropout(dropout))
 
-    # Output layer
-    model.add(Dense(N_STEPS, activation="linear"))
+    # Default Output layer:
+    model.add(Dense(n_steps * n_features, activation="linear"))
+    model.add(Reshape((n_steps, n_features)))
     # Compile the model
-    model.compile(loss=loss, metrics=["mean_absolute_error"], optimizer=optimizer)
+    model.compile(loss=loss, optimizer=optimizer, metrics=["mean_absolute_error"])
 
     return model
 
-def refine_model(model, path, x_test, y_test):
+def train_neural_model(data):
+    """
+    Traing and deploy the Neural Network model
+    """
+    if not os.path.isdir(MODEL_DIR):
+        os.mkdir(MODEL_DIR)
+
+    model_file = os.path.join(MODEL_DIR, f"{CELL.__name__}_{LOSS}_{OPTIMIZER}_seq-{N_LOOKUP}_steps-{N_STEPS}_layers-{len(LAYERS)}")
+
+    # If the model already exists in local directory
+    # Load it
+    if os.path.isfile(f"{model_file}.h5"):
+        model = load_model(f"{model_file}.h5")
+    # Else, create a new one
+    else:
+        model = create_neural_model()
+        # optimizer='rmsprop'/'sgd'/'adadelta'/...
+        # loss='mean_absolute_error'/'huber_loss'/'cosine_similarity'/...
+        
+        # reducer = ReduceLROnPlateau(monitor="val_loss", factor=0.1, patience=10, min_lr=0.0001)
+        checkpointer = ModelCheckpoint(f"{model_file}-best.h5",
+                                    save_weights_only=True, save_best_only=True,
+                                    monitor="val_loss", mode="min")
+        
+        # Train the model with the training data
+        model.fit(data['x_train'], data['y_train'],
+            epochs=EPOCH, batch_size=BATCH,
+            validation_data=(data["x_test"], data["y_test"]),
+            callbacks=[checkpointer])
+        
+        # Fine tune the model
+        model = tune_neural_model(model, model_file, data['x_test'], data['y_test'])
+
+    return model
+
+def tune_neural_model(model, path, x_test, y_test):
+    """
+    Refine the model's weight for optimisation
+    """
     model.save_weights(f"{path}-test.h5")
     loss_test, _ = model.evaluate(x_test, y_test)
 
@@ -431,41 +326,115 @@ def refine_model(model, path, x_test, y_test):
 
     # plot_model(model, to_file=f"{model_file}.png", show_shapes=True, show_layer_names=True)
 
+    return model    
+
+def train_arima_model(data, order=ORDER):
+    """
+    Create and train a ARIMA/SARIMA model based on the given order (can be later computed)
+    """
+    # If order is not specified - use auto_arima for auto-computation
+    # order = pm.auto_arima(data['df_train']['Close'], seasonal=False, stepwise=True)
+    # print(order.order)
+    
+    # Create an ARIMA model with the training dataset for 'Close' feature
+    model = ARIMA(data['df_train']['Close'], order=order).fit()
+
+    return model
+
+def train_rf_model(data):
+    """
+    Create and train a Random Forest model
+    """
+    # Unlike LSTM, the input shape of the RF model is 2D
+    # So we need to reshape the x_train and y_train data
+    x_train = data['x_train'].reshape((data['x_train'].shape[0], -1))
+    y_train = data['y_train'].reshape((data['y_train'].shape[0], -1))
+
+    model = RandomForestRegressor(n_estimators=N_ESTIMATORS, random_state=N_RANDOM)
+    model.fit(x_train, y_train)
+
     return model
 
 #------------------------------------------------------------------------------
-# Plot the Graph
-def plot(dates, actual, predicted):
-    plt.plot(dates, actual[:, 0], color="black", label=f"Actual {TICKER} Price")
-    plt.plot(dates, predicted[:, 0], color="green", label=f"Predicted {TICKER} Price")
-
-    plt.title(f"{TICKER} Share Price")
-    plt.xlabel("Time")
-    plt.ylabel(f"{TICKER} Share Price")
-    plt.legend()
-    plt.show()
-
-#------------------------------------------------------------------------------
 # Predict Next Day
-def predict(model, data):
-    model_inputs = data['df'][len(data['df']) - len(data['y_test']) - N_LOOKUP:].copy()
-    for feature in FEATURES:
-        model_inputs.loc[:, feature] = data['scalers'][feature].transform(model_inputs[feature].values.reshape(-1, 1))
+def predict_neural(model, data, dates, scalers, cols=FEATURES):
+    # Predicting the stock prices using the model
+    pred = model.predict(data)
 
-    # model_inputs = model_inputs.reshape(-1, 1)
-    # model_inputs = data['scaler'].transform(model_inputs)
+    # Inverse transforming the normalized predictions
+    predictions = {}
+    for i, col in enumerate(cols):
+        scaler = scalers[col]
+        # Reshape the array to 2D before inverse transforming, then flatten back to 1D
+        # Extract only the first day's prediction for each input sample
+        predictions[col] = scaler.inverse_transform(pred[:,:,i].reshape(-1, 1)).flatten()
+    
+    # Creating a DataFrame from the inverse-transformed predictions
+    pred_df = pd.DataFrame(predictions)
+    
+    # Generate a new index for the DataFrame
+    dates_idx = []
+    start_idx = len(dates) - len(data)
+    for i in range(len(data)):
+        current_date = dates[start_idx + i]
+        for step in range(N_STEPS):
+            next_date = current_date + timedelta(days=step)
+            while next_date not in dates and next_date <= dates[-1]:
+                # Increment the date until a matching date is found or the end of the date range is reached
+                next_date += timedelta(days=1)
+            dates_idx.append(next_date)
 
-    # TO DO: Explain the above line
-    real_data = model_inputs.iloc[-N_LOOKUP:].values
-    real_data = np.expand_dims(real_data, axis=0)
+    # Assign the new index to the DataFrame
+    pred_df.index = pd.DatetimeIndex(dates_idx)
+    pred_df = pred_df.groupby(pred_df.index).agg({
+        'Open': 'first',
+        'High': 'max',
+        'Low': 'min',
+        'Close': 'last',
+        'Adj Close': 'last',
+        'Volume': 'sum'
+    }).dropna()
+    
+    return pred_df
 
-    predictions = model.predict(real_data)
-    predictions = data['scalers'][FEATURE].inverse_transform(predictions)
+def predict_arima(model, data, dates):
+    predictions = model.forecast(data.shape[0])
 
-    for i in range(N_STEPS):
-        print(f"Prediction Day {i+1}:\t{predictions[0][i]:.2f}")
+    pred_df = pd.DataFrame({FEATURE: predictions.values}, index=dates)
+    for col in FEATURES:
+        if col != FEATURE:
+            pred_df[col] = data[col]
 
-def predict_rf(model, data):
+    return pred_df
+
+def predict_rf(model, data, dates, scalers, cols=FEATURES):
+    pred = model.predict(data)
+
+    # Inverse transforming the normalized predictions
+    predictions = {}
+    for i, col in enumerate(cols):
+        scaler = scalers[col]
+        # Reshape the array to 2D before inverse transforming, then flatten back to 1D
+        # Extract only the first day's prediction for each input sample
+        predictions[col] = scaler.inverse_transform(pred[:,:,i].reshape(-1, 1)).flatten()
+    
+    # Creating a DataFrame from the inverse-transformed predictions
+    pred_df = pd.DataFrame(predictions, index=dates)
+
+    return pred_df
+
+def predict_ensemble(lstm_pred, arima_pred):
+    common_dates = lstm_pred.index.intersection(arima_pred.index)
+    lstm_pred  = lstm_pred.loc[common_dates]
+    arima_pred = arima_pred.loc[common_dates]
+
+    ensemble_df = (lstm_pred + arima_pred) / 2
+
+    return ensemble_df[FEATURE]
+
+### Legacy Code
+### For Rolling Forecasts
+def predict_rolling_forecasts(model, data):
     predictions = []
     
     model_inputs = data['df'][len(data['df']) - len(data['y_test']) - N_LOOKUP:].copy()
@@ -498,74 +467,187 @@ def predict_rf(model, data):
         print(f"Prediction Day {i+1}:\t{prediction:.2f}")
 
 #------------------------------------------------------------------------------
+# Store Figures as Images
+def export_fig(fig, name):
+    if not os.path.isdir("imgs"):
+        os.mkdir("imgs")
+
+    fig.write_image(f"imgs/{name}.png")
+
+def resample_data(data, days):
+    assert days >= 0, "Days must be >= 1."
+
+    aggregation = {
+          'Open': 'first',
+          'High': 'max',
+          'Low': 'min',
+          'Close': 'last',
+          'Adj Close': 'last',
+          'Volume': 'sum'
+    }
+
+    return data.resample(f'{days}d').agg(aggregation).dropna()
+
+#------------------------------------------------------------------------------
+# Plot the Graph
+def plot(data, pred, dates):
+
+    plt.figure(figsize=(15, 6))
+    plt.plot(dates, data, color="blue", label=f"Actual {TICKER} Price")
+    plt.plot(dates, pred, color="green", label=f"Predicted {TICKER} Price")
+
+    plt.title(f"{TICKER} Share Price")
+    plt.xlabel("Time")
+    plt.ylabel(f"{TICKER} Share Price")
+    plt.legend()
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+#------------------------------------------------------------------------------
+# Plot Data using Candlestick Chart
+def plot_candlestick(data, pred, days=1, col='Close'):
+    """
+    Visualise historical data for analysis using Candlestick chart with the option to adjust the moving window of n trading days (n >= 1)
+    Params:
+        data    (pd.DataFrame)  : The historical data to visualise
+        title   (str)           : The title of the chart - to be consistent with Datetime, TICKER, etc.
+        days    (int)           : The number of trading days for each candlestick to represent
+    """
+
+    # Calculate the mean of each attribute over n trading days
+    # Aggregate n trading days into one data
+    data = resample_data(data, days)
+    pred = resample_data(pred, days)
+
+        # Alternative: Each attribute can be calculated by their characteristics
+        # e.g
+        # - Open  - opening price of the first trading day in the range,
+        # - High  - highest price within the date range
+        # - Low   - lowest price within the date range
+        # - Close - closing price of the last trading day in the range
+        
+        #   'Open': 'first',
+        #   'High': 'max',
+        #   'Low': 'min',
+        #   'Close': 'last',
+        #   'Adj Close': 'last',
+        #   'Volume': 'sum'
+
+    # Create a Candlestick chart
+    candlestick = go.Candlestick(
+        x=data.index,
+        open=data['Open'],
+        high=data['High'],
+        low=data['Low'],
+        close=data['Close'],
+        name='OHLC',
+        showlegend=False,
+    )
+
+    volume = go.Bar(
+        x=data.index,
+        y=data['Volume'],
+        name='Volume',
+        showlegend=False,
+    )
+
+    pred = go.Scatter(
+        x=pred.index,
+        y=pred[col],
+        marker={"color": "black"},
+        name=f'Predicted {col}',
+    )
+
+    real = go.Scatter(
+        x=data.index,
+        y=data[col],
+        marker={"color": "blue"},
+        name=f'Actual {col}',
+    ) 
+    
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        row_heights=[0.8, 0.2]
+    )
+
+    fig.add_trace(candlestick, row=1, col=1)
+    fig.add_trace(volume, row=2, col=1)
+    fig.add_trace(pred, row=1, col=1)
+    fig.add_trace(real, row=1, col=1)
+
+    # Add labels to the chart
+    fig.update_layout(
+        title=f'{TICKER} Share Prices {data.index[0]:%b %Y} - {data.index[-1]:%b %Y}',
+        xaxis_title='Date',
+        yaxis_title='Price',
+        xaxis_rangeslider_visible=False
+    )
+
+    fig.show()
+
+    # Export figure as PNG
+    # export_fig(fig, f"Candlestick_{TICKER}_{days}_{title[-24:]}")
+
+#------------------------------------------------------------------------------
+# Plot Data using Boxplot Chart
+def plot_box(data, pred, days=1, col='Close'):
+
+    """
+    Visualise historical data for analysis using Box plot over a moving window of n trading days (n >= 1)
+    Params:
+        
+    """
+    windows = data.groupby(pd.Grouper(level=0, freq=f"{days}D"))
+    pred = resample_data(pred, days)
+
+    boxes = []
+    for time, window in windows:
+        # If no data in the window, skip it
+        if len(window) == 0:
+            continue
+
+        # Create a boxplot for each time window
+        box = go.Box(
+            y = window[col],
+            name = f"{time}",
+            showlegend=False
+            # boxpoints="all"
+        )
+        boxes.append(box)
+
+    scatter = go.Scatter(
+        x=pred.index,
+        y=pred[col],
+        name=f'Predicted {col}'
+    )
+
+    layout = go.Layout(
+		title=f'{TICKER} Share Prices {data.index[0]:%b %Y} - {data.index[-1]:%b %Y}',
+        xaxis_title="Date",
+        yaxis_title=f"{col} Prices",
+    )
+
+    fig = go.Figure(data=(boxes + [scatter]), layout=layout)
+    fig.show()
+
+    # Export figure as PNG
+    # export_fig(fig, f"Box_{TICKER}_{days}_{title[-24:]}")
+    # Export figure as PNG
+    # export_fig(fig, f"Box_{TICKER}_{days}_{title[-24:]}")
+
+#------------------------------------------------------------------------------
 ## MAIN ##
 #------------------------------------------------------------------------------
-## split_by = "random" - Default
-# data, x_train, y_train, x_test, y_test, scaler, dates = load_data()
+data = load_data()
+data = prepare_data(data, split_by="ratio", split_pt=0.8)
 
-## split_by = "date"
-# data, x_train, y_train, x_test, y_test, scaler, dates = load_data(split_by="date", split_pt=TEST_START)
-
-## split_by = "ratio"
-data = load_data(split_by="ratio", split_pt=0.6)
-
-print(data['df'].tail(10))
-
-PLOT_START = "2022-01-01"
-PLOT_END   = "2022-12-31"
-
-# The following lines are to scale the historical data to fit the testing frame
-plot_date = pd.date_range(start=PLOT_START, end=PLOT_END)
-plot_data = data["df"][data["df"].index.isin(plot_date)]
-
-# Plot historical data using Candlestick chart
-# plot_candlestick(plot_data, f"{TICKER} Share Price from {PLOT_START} to {PLOT_END}", TIME_WINDOW)
-
-# Plot historical data using Box plot
-# plot_box(plot_data, f"{TICKER} Share Price from {PLOT_START} to {PLOT_END}", "Open", TIME_WINDOW)
-
-#------------------------------------------------------------------------------
-# Build the Model
-## TO DO:
-# 1) Check if data has been built before. 
-# If so, load the saved data
-# If not, save the data into a directory
-# 2) Change the model to increase accuracy?
-#------------------------------------------------------------------------------
-# TO DO:
-# Save the model and reload it
-# Sometimes, it takes a lot of effort to train your model (again, look at
-# a training data with billions of input samples). Thus, after spending so 
-# much computing power to train your model, you may want to save it so that
-# in the future, when you want to make the prediction, you only need to load
-# your pre-trained model and run it on the new input for which the prediction
-# need to be made.
-model_file = os.path.join("results", f"{TICKER}_{TRAIN_START}-{TEST_END}_{CELL.__name__}_{LOSS}_{OPTIMIZER}_seq-{N_LOOKUP}_layers-{LAYERS}_units-{UNITS}")
-
-if os.path.isfile(f"{model_file}.h5"):
-    model = load_model(f"{model_file}.h5")
-else:
-    model = create_model()
-
-    # The optimizer and loss are two important parameters when building an 
-    # ANN model. Choosing a different optimizer/loss can affect the prediction
-    # quality significantly. You should try other settings to learn; e.g.
-    # optimizer='rmsprop'/'sgd'/'adadelta'/...
-    # loss='mean_absolute_error'/'huber_loss'/'cosine_similarity'/...
-    
-    # reducer = ReduceLROnPlateau(monitor="val_loss", factor=0.1, patience=10, min_lr=0.0001)
-    checkpointer = ModelCheckpoint(f"{model_file}-best.h5",
-                                   save_weights_only=True, save_best_only=True,
-                                   monitor="val_loss", mode="min")
-    
-    # Now we are going to train this model with our training data 
-    # (x_train, y_train)
-    model.fit(data['x_train'], data['y_train'],
-        epochs=EPOCH, batch_size=BATCH,
-        validation_data=(data["x_test"], data["y_test"]),
-        callbacks=[checkpointer])
-    
-    model = refine_model(model, model_file, data['x_test'], data['y_test'])
+neural_model = train_neural_model(data)
+arima_model  = train_arima_model(data)
+# rf_model     = train_rf_model(data)
 
 # Other parameters to consider: How many rounds(epochs) are we going to 
 # train our model? Typically, the more the better, but be careful about
@@ -581,35 +663,23 @@ else:
 
 #------------------------------------------------------------------------------
 # Test the model accuracy on existing data
-#------------------------------------------------------------------------------
-# Load the test data
-# TO DO: Generally, there is a better way to process the data so that we 
-# can use part of it for training and the rest for testing. You need to 
-# implement such a way
-predicted_prices = model.predict(data['x_test'])
-predicted_prices = np.squeeze(data['scalers'][FEATURE].inverse_transform(predicted_prices))
-# Clearly, as we transform our data into the normalized range (0,1),
-# we now need to reverse this transformation 
-actual_prices = np.squeeze(data['scalers'][FEATURE].inverse_transform(data['y_test']))
+# data['df_pred_n'] = predict_neural(neural_model, data['x_test'], data['d_test'], data['scalers'])
+# data['df_pred_a'] = predict_arima(arima_model, data['df_test'], data['df_test'].index)
+
+# Plot the Data
+# plot_candlestick(data['df_test'], data['df_pred'], days=7)
+# plot_box(data['df_test'], data['df_pred'], days=7)
 
 #------------------------------------------------------------------------------
-# Plot the test predictions
-## To do:
-# 1) Candle stick charts
-# 2) Chart showing High & Lows of the day
-# 3) Show chart of next few days (predicted)
-#------------------------------------------------------------------------------
+# Predict next days
+dates = pd.date_range(data['df'].index[-1] + timedelta(days=1), periods=N_STEPS, name='Date')
+data['df_pred_n'] = predict_neural(neural_model, data['model_inputs'], dates, data['scalers'])
+data['df_pred_a'] = predict_arima(arima_model,  data['df_test'].tail(7), dates)
 
-# Refine test dates to only YEAR for plotting
-# dates = pd.to_datetime(data['d_test'])
-# years = dates.year.un#ique()
+data['model_outputs'] = predict_ensemble(data['df_pred_n'], data['df_pred_a'])
 
-plot(data['d_test'], actual_prices, predicted_prices)
-
-#------------------------------------------------------------------------------
-# Predict next day
-#------------------------------------------------------------------------------
-predict(model, data)
+print(f"Predicted Prices")
+print(data['model_outputs'])
 
 # A few concluding remarks here:
 # 1. The predictor is quite bad, especially if you look at the next day prediction,
